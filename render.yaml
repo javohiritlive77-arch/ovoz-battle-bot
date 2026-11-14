@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: ovoz-battle-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        value: "8327302562"
+      - key: DB_PATH
+        value: /data/battle.db
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
