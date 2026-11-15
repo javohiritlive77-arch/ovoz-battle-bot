@@ -4,8 +4,10 @@ import logging
 import os
 import re
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 
+import aiohttp
 from aiohttp import web
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -190,6 +192,117 @@ def ALL(key):
     return [TX["uz"][key], TX["ru"][key]]
 
 
+# ============================================================ BATTLE MATNLARI (uz / ru / en)
+BT = {
+    "uz": {
+        "head": "🏆 <b>OVOZ BATL BOSHLANDI</b> 🥱",
+        "by": "@{u} dan qilindi",
+        "rules": "❗️ <b>Konkurs shartlari:</b> shu kanalga obuna bo'lish va do'stlaringiz sizga ovoz berishini so'rashdan iborat.",
+        "leave": "⚠️ Agar ovoz beruvchi kanaldan chiqib ketsa, ovozi avtomatik olib tashlanadi ⛔️",
+        "prize": "🎁 <b>Konkursga qo'yilgan yutuqlar:</b> {p}",
+        "no_prize": "Hozircha Sir 🤫",
+        "end_time": "⏱ <b>Tugash vaqti:</b> {t}",
+        "end_votes": "🎯 <b>Birinchi bo'lib {n} ovoz yig'gan g'olib bo'ladi</b>",
+        "extra": "📢 <b>Majburiy kanallar:</b> {c}",
+        "hint": "➕ Konkursga qo'shilish uchun quyidagi tugmani bosing 👇",
+        "fin": "🏁 <b>OVOZ BATL TUGADI</b>",
+        "winner": "🏆 <b>G'olib:</b> {w}",
+        "nopart": "Ishtirokchilar bo'lmadi.",
+        "b_join": "➕ Qatnashish", "b_end": "📊 Natijalar (battleni tugatish)",
+        "b_done": "🏁 Battle tugagan", "b_who": "🗳 Ovoz berganlar",
+        "a_ended": "Battle tugagan 🏁",
+        "a_nopart": "Ishtirokchi topilmadi",
+        "a_need": "Ovoz berish uchun obuna bo'ling: {c}",
+        "a_voted": "Siz allaqachon ovoz bergansiz ✅",
+        "a_ok": "✅ Ovozingiz qabul qilindi!",
+        "a_end_admin": "Faqat kanal admini tugata oladi",
+        "a_end_done": "Battle allaqachon tugagan 🏁",
+        "a_end_ok": "🏁 Battle tugadi!",
+        "a_who_admin": "Bu tugma faqat kanal admini/egasi uchun 🔒",
+        "a_who_ok": "Ro'yxat shaxsiy xabarga yuborildi ✉️",
+        "a_who_fail": "Avval botga o'tib /start bosing, so'ng qayta urining",
+        "who_title": "🗳 <b>Ovoz berganlar</b>", "who_empty": "Hali ishtirokchi yo'q",
+        "j_ended": "Bu battle tugagan yoki topilmadi.",
+        "j_need": "Qatnashish uchun avval quyidagi kanallarga obuna bo'ling 👇",
+        "j_check": "✅ Tekshirish",
+        "j_ok": "✅ Siz battlega qo'shildingiz! Do'stlaringizdan ovoz so'rang 🔥",
+    },
+    "ru": {
+        "head": "🏆 <b>ГОЛОСОВАНИЕ-БАТЛ НАЧАЛОСЬ</b> 🥱",
+        "by": "Сделано в @{u}",
+        "rules": "❗️ <b>Условия конкурса:</b> подписаться на этот канал и попросить друзей проголосовать за вас.",
+        "leave": "⚠️ Если проголосовавший выйдет из канала, его голос будет автоматически снят ⛔️",
+        "prize": "🎁 <b>Призы конкурса:</b> {p}",
+        "no_prize": "Пока секрет 🤫",
+        "end_time": "⏱ <b>Окончание:</b> {t}",
+        "end_votes": "🎯 <b>Побеждает тот, кто первым наберёт {n} голосов</b>",
+        "extra": "📢 <b>Обязательные каналы:</b> {c}",
+        "hint": "➕ Чтобы участвовать, нажмите кнопку ниже 👇",
+        "fin": "🏁 <b>БАТЛ ЗАВЕРШЁН</b>",
+        "winner": "🏆 <b>Победитель:</b> {w}",
+        "nopart": "Участников не было.",
+        "b_join": "➕ Участвовать", "b_end": "📊 Результаты (завершить батл)",
+        "b_done": "🏁 Батл завершён", "b_who": "🗳 Кто проголосовал",
+        "a_ended": "Батл завершён 🏁",
+        "a_nopart": "Участник не найден",
+        "a_need": "Чтобы голосовать, подпишитесь: {c}",
+        "a_voted": "Вы уже проголосовали ✅",
+        "a_ok": "✅ Ваш голос принят!",
+        "a_end_admin": "Завершить может только админ канала",
+        "a_end_done": "Батл уже завершён 🏁",
+        "a_end_ok": "🏁 Батл завершён!",
+        "a_who_admin": "Эта кнопка только для админа/владельца канала 🔒",
+        "a_who_ok": "Список отправлен в личные сообщения ✉️",
+        "a_who_fail": "Сначала откройте бота и нажмите /start, затем повторите",
+        "who_title": "🗳 <b>Кто проголосовал</b>", "who_empty": "Участников пока нет",
+        "j_ended": "Этот батл завершён или не найден.",
+        "j_need": "Чтобы участвовать, сначала подпишитесь на каналы 👇",
+        "j_check": "✅ Проверить",
+        "j_ok": "✅ Вы участвуете в батле! Попросите друзей проголосовать 🔥",
+    },
+    "en": {
+        "head": "🏆 <b>VOTE BATTLE HAS STARTED</b> 🥱",
+        "by": "Made with @{u}",
+        "rules": "❗️ <b>Contest rules:</b> subscribe to this channel and ask your friends to vote for you.",
+        "leave": "⚠️ If a voter leaves the channel, their vote is removed automatically ⛔️",
+        "prize": "🎁 <b>Contest prizes:</b> {p}",
+        "no_prize": "A secret for now 🤫",
+        "end_time": "⏱ <b>Ends at:</b> {t}",
+        "end_votes": "🎯 <b>The first to collect {n} votes wins</b>",
+        "extra": "📢 <b>Required channels:</b> {c}",
+        "hint": "➕ Tap the button below to join the contest 👇",
+        "fin": "🏁 <b>VOTE BATTLE IS OVER</b>",
+        "winner": "🏆 <b>Winner:</b> {w}",
+        "nopart": "There were no participants.",
+        "b_join": "➕ Join", "b_end": "📊 Results (end battle)",
+        "b_done": "🏁 Battle is over", "b_who": "🗳 Who voted",
+        "a_ended": "The battle is over 🏁",
+        "a_nopart": "Participant not found",
+        "a_need": "Subscribe to vote: {c}",
+        "a_voted": "You have already voted ✅",
+        "a_ok": "✅ Your vote is counted!",
+        "a_end_admin": "Only a channel admin can end the battle",
+        "a_end_done": "The battle is already over 🏁",
+        "a_end_ok": "🏁 The battle is over!",
+        "a_who_admin": "This button is for channel admins/owner only 🔒",
+        "a_who_ok": "The list was sent to your private chat ✉️",
+        "a_who_fail": "Open the bot and press /start first, then try again",
+        "who_title": "🗳 <b>Who voted</b>", "who_empty": "No participants yet",
+        "j_ended": "This battle is over or not found.",
+        "j_need": "To join, first subscribe to the channels below 👇",
+        "j_check": "✅ Check",
+        "j_ok": "✅ You joined the battle! Ask your friends to vote 🔥",
+    },
+}
+
+
+def B(x, key, **kw):
+    """x - battle qatori yoki til kodi ('uz'/'ru'/'en')."""
+    L = x if isinstance(x, str) else (x["lang"] or "uz")
+    s = BT.get(L, BT["uz"])[key]
+    return s.format(**kw) if kw else s
+
+
 # ============================================================ DB
 db = sqlite3.connect(DB_PATH, check_same_thread=False)
 db.row_factory = sqlite3.Row
@@ -212,7 +325,16 @@ CREATE TABLE IF NOT EXISTS gifts(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT
 CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, gift_id INTEGER,
   gift_name TEXT, price INTEGER, ts TEXT);
 CREATE TABLE IF NOT EXISTS support(msg_id INTEGER PRIMARY KEY, user_id INTEGER);
+CREATE TABLE IF NOT EXISTS battle_channels(battle_id INTEGER, chat_id INTEGER, title TEXT, link TEXT,
+  PRIMARY KEY(battle_id, chat_id));
 """)
+for _col in ("name TEXT DEFAULT ''", "prize TEXT DEFAULT ''", "lang TEXT DEFAULT 'uz'",
+             "end_type TEXT DEFAULT ''", "end_ts INTEGER DEFAULT 0", "end_votes INTEGER DEFAULT 0"):
+    try:
+        db.execute(f"ALTER TABLE battles ADD COLUMN {_col}")
+        db.commit()
+    except sqlite3.OperationalError:
+        pass
 
 
 def ex(sql, *args):
@@ -389,38 +511,60 @@ class Gate(BaseMiddleware):
 
 
 # ============================================================ BATTLE POSTI
+def fmt_time(ts) -> str:
+    return datetime.fromtimestamp(ts, TZ).strftime("%d.%m.%Y %H:%M")
+
+
+def extras(bid):
+    return q("SELECT * FROM battle_channels WHERE battle_id=?", bid)
+
+
 def post_text(b) -> str:
+    L = b["lang"] or "uz"
     if not b["finished"]:
-        return (
-            "🏆 <b>OVOZ BATL BOSHLANDI</b> 🥱\n\n"
-            f"@{UNAME} dan qilindi\n"
-            "❗️ <b>Konkurs shartlari:</b> shu kanalga obuna bo'lish va do'stlaringiz "
-            "sizga ovoz berishini so'rashdan iborat.\n\n"
-            "⚠️ Agar ovoz beruvchi kanaldan chiqib ketsa, ovozi avtomatik olib tashlanadi ⛔️\n\n"
-            "🎁 <b>Konkursga qo'yilgan yutuqlar:</b> — Hozircha Sir 🤫\n\n"
-            "➕ Konkursga qo'shilish uchun quyidagi tugmani bosing 👇"
-        )
+        prize = html.escape(b["prize"]) if b["prize"] else B(L, "no_prize")
+        lines = [B(L, "head"), ""]
+        if b["name"]:
+            lines.append(f"📝 <b>{html.escape(b['name'])}</b>")
+        lines += [B(L, "by", u=UNAME), B(L, "rules"), "", B(L, "leave"), "",
+                  B(L, "prize", p=prize)]
+        if b["end_type"] == "time" and b["end_ts"]:
+            lines.append(B(L, "end_time", t=fmt_time(b["end_ts"])))
+        elif b["end_type"] == "votes" and b["end_votes"]:
+            lines.append(B(L, "end_votes", n=b["end_votes"]))
+        ex_ = extras(b["id"])
+        if ex_:
+            lines.append(B(L, "extra", c=", ".join(
+                f'<a href="{e["link"]}">{html.escape(e["title"])}</a>' for e in ex_)))
+        lines += ["", B(L, "hint")]
+        return "\n".join(lines)
     rows = standings(b["id"])
     medals = ["🥇", "🥈", "🥉"]
     lines = [f"{medals[i] if i < 3 else str(i + 1) + '.'} {html.escape(r['name'])} — <b>{r['c']}</b>"
              for i, r in enumerate(rows)]
-    win = f"\n\n🏆 <b>G'olib:</b> {html.escape(rows[0]['name'])}" if rows and rows[0]["c"] else ""
-    return ("🏁 <b>OVOZ BATL TUGADI</b>\n\n" + ("\n".join(lines) or "Ishtirokchilar bo'lmadi.") + win +
-            f"\n\n@{UNAME} dan qilindi")
+    out = [B(L, "fin")]
+    if b["name"]:
+        out.append(f"📝 <b>{html.escape(b['name'])}</b>")
+    out += ["", "\n".join(lines) or B(L, "nopart")]
+    if rows and rows[0]["c"]:
+        out += ["", B(L, "winner", w=html.escape(rows[0]["name"]))]
+    out += ["", B(L, "by", u=UNAME)]
+    return "\n".join(out)
 
 
 def keyboard(b) -> InlineKeyboardMarkup:
     bid = b["id"]
+    L = b["lang"] or "uz"
     kb = InlineKeyboardBuilder()
     if not b["finished"]:
-        kb.row(ib("➕ Qatnashish", url=f"https://t.me/{UNAME}?start=b{bid}"))
+        kb.row(ib(B(L, "b_join"), url=f"https://t.me/{UNAME}?start=b{bid}"))
     for r in standings(bid):
         kb.row(ib(f"{r['name'][:30]} ({r['c']})", f"v:{bid}:{r['user_id']}"))
     if b["finished"]:
-        kb.row(ib("🏁 Battle tugagan", f"done:{bid}"))
+        kb.row(ib(B(L, "b_done"), f"done:{bid}"))
     else:
-        kb.row(ib("📊 Natijalar (battleni tugatish)", f"end:{bid}"))
-    kb.row(ib("🗳 Ovoz berganlar", f"who:{bid}"))
+        kb.row(ib(B(L, "b_end"), f"end:{bid}"))
+    kb.row(ib(B(L, "b_who"), f"who:{bid}"))
     return kb.as_markup()
 
 
@@ -440,6 +584,34 @@ async def refresh(bot: Bot, bid: int):
             logging.warning("refresh: %s", e)
 
 
+async def finish(bot: Bot, bid: int):
+    ex("UPDATE battles SET finished=1 WHERE id=?", bid)
+    await refresh(bot, bid)
+
+
+async def create_battle(bot: Bot, chat, owner=0, name="", prize="", lang="uz",
+                        end_type="", end_ts=0, end_votes=0, ext=()):
+    """Battle yaratadi va kanalga post yuboradi. Xato bo'lsa battleni o'chirib, xatoni qaytaradi."""
+    ex("""INSERT INTO chats(chat_id,title,username) VALUES(?,?,?)
+          ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title, username=excluded.username""",
+       chat.id, chat.title or "", chat.username or "")
+    if owner:
+        ex("UPDATE chats SET owner_id=? WHERE chat_id=?", owner, chat.id)
+    bid = ex("""INSERT INTO battles(chat_id,name,prize,lang,end_type,end_ts,end_votes)
+                VALUES(?,?,?,?,?,?,?)""", chat.id, name, prize, lang, end_type, end_ts, end_votes).lastrowid
+    for e in ext:
+        ex("INSERT OR REPLACE INTO battle_channels VALUES(?,?,?,?)", bid, e["chat_id"], e["title"], e["link"])
+    b = battle(bid)
+    try:
+        sent = await bot.send_message(chat.id, post_text(b), reply_markup=keyboard(b))
+    except Exception:
+        ex("DELETE FROM battles WHERE id=?", bid)
+        ex("DELETE FROM battle_channels WHERE battle_id=?", bid)
+        raise
+    ex("UPDATE battles SET message_id=? WHERE id=?", sent.message_id, bid)
+    return bid, sent.message_id
+
+
 @router.channel_post()
 async def on_channel_post(m: Message, bot: Bot):
     txt = m.text or m.caption or ""
@@ -449,27 +621,48 @@ async def on_channel_post(m: Message, bot: Bot):
         await m.delete()
     except TelegramBadRequest:
         pass
-    ex("""INSERT INTO chats(chat_id,title,username) VALUES(?,?,?)
-          ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title, username=excluded.username""",
-       m.chat.id, m.chat.title or "", m.chat.username or "")
-    bid = ex("INSERT INTO battles(chat_id) VALUES(?)", m.chat.id).lastrowid
-    sent = await bot.send_message(m.chat.id, post_text(battle(bid)), reply_markup=keyboard(battle(bid)))
-    ex("UPDATE battles SET message_id=? WHERE id=?", sent.message_id, bid)
+    await create_battle(bot, m.chat)
+
+
+async def chan_info(bot: Bot, chat_id):
+    try:
+        title = (await bot.get_chat(chat_id)).title or str(chat_id)
+    except Exception:
+        title = str(chat_id)
+    try:
+        link = await chat_link(bot, chat_id)
+    except Exception:
+        link = None
+    return {"title": title, "link": link}
+
+
+async def missing_for(bot: Bot, b, uid):
+    """Foydalanuvchi obuna bo'lmagan kanallar (asosiy + qo'shimcha)."""
+    out = []
+    if not await is_member(bot, b["chat_id"], uid):
+        out.append(await chan_info(bot, b["chat_id"]))
+    for e in extras(b["id"]):
+        if not await is_member(bot, e["chat_id"], uid, default=True):
+            out.append({"title": e["title"], "link": e["link"]})
+    return out
 
 
 async def try_join(bot: Bot, user, bid: int):
     b = battle(bid)
     if not b or b["finished"]:
-        return "Bu battle tugagan yoki topilmadi.", None
-    if not await is_member(bot, b["chat_id"], user.id):
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [ib("📢 Kanalga obuna bo'lish", url=await chat_link(bot, b["chat_id"]))],
-            [ib("✅ Tekshirish", f"chk:{bid}")]])
-        return "Qatnashish uchun avval kanalga obuna bo'ling 👇", kb
+        return B(b or "uz", "j_ended"), None
+    miss = await missing_for(bot, b, user.id)
+    if miss:
+        kb = InlineKeyboardBuilder()
+        for i in miss:
+            if i["link"]:
+                kb.row(ib(f"📢 {i['title']}", url=i["link"]))
+        kb.row(ib(B(b, "j_check"), f"chk:{bid}"))
+        return B(b, "j_need"), kb.as_markup()
     name = f"@{user.username}" if user.username else user.full_name
     ex("INSERT OR REPLACE INTO participants(battle_id,user_id,name) VALUES(?,?,?)", bid, user.id, name)
     await refresh(bot, bid)
-    return "✅ Siz battlega qo'shildingiz! Do'stlaringizdan ovoz so'rang 🔥", None
+    return B(b, "j_ok"), None
 
 
 @router.callback_query(F.data.startswith("chk:"))
@@ -485,21 +678,26 @@ async def vote(c: CallbackQuery, bot: Bot):
     bid, pid = int(bid), int(pid)
     b = battle(bid)
     if not b or b["finished"]:
-        return await c.answer("Battle tugagan 🏁", show_alert=True)
+        return await c.answer(B(b or "uz", "a_ended"), show_alert=True)
     if not q("SELECT 1 FROM participants WHERE battle_id=? AND user_id=?", bid, pid):
-        return await c.answer("Ishtirokchi topilmadi", show_alert=True)
-    if not await is_member(bot, b["chat_id"], c.from_user.id):
-        return await c.answer("Ovoz berish uchun avval kanalga obuna bo'ling!", show_alert=True)
+        return await c.answer(B(b, "a_nopart"), show_alert=True)
+    miss = await missing_for(bot, b, c.from_user.id)
+    if miss:
+        return await c.answer(B(b, "a_need", c=", ".join(i["title"] for i in miss)[:100]), show_alert=True)
     if q("SELECT 1 FROM votes WHERE battle_id=? AND voter_id=?", bid, c.from_user.id):
-        return await c.answer("Siz allaqachon ovoz bergansiz ✅", show_alert=True)
+        return await c.answer(B(b, "a_voted"), show_alert=True)
     ex("INSERT INTO votes VALUES(?,?,?,?)", bid, c.from_user.id, c.from_user.full_name, pid)
-    await c.answer("✅ Ovozingiz qabul qilindi!")
-    await refresh(bot, bid)
+    await c.answer(B(b, "a_ok"))
+    if b["end_type"] == "votes" and b["end_votes"] and standings(bid)[0]["c"] >= b["end_votes"]:
+        await finish(bot, bid)          # kim birinchi yetsa, avtomatik tugaydi
+    else:
+        await refresh(bot, bid)
 
 
 @router.callback_query(F.data.startswith("done:"))
 async def done(c: CallbackQuery):
-    await c.answer("Battle tugagan 🏁", show_alert=True)
+    b = battle(int(c.data.split(":")[1]))
+    await c.answer(B(b or "uz", "a_ended"), show_alert=True)
 
 
 @router.callback_query(F.data.startswith("end:"))
@@ -509,12 +707,11 @@ async def end(c: CallbackQuery, bot: Bot):
     if not b:
         return await c.answer()
     if not await is_chan_admin(bot, b["chat_id"], c.from_user.id):
-        return await c.answer("Faqat kanal admini tugata oladi", show_alert=True)
+        return await c.answer(B(b, "a_end_admin"), show_alert=True)
     if b["finished"]:
-        return await c.answer("Battle allaqachon tugagan 🏁", show_alert=True)
-    ex("UPDATE battles SET finished=1 WHERE id=?", bid)
-    await refresh(bot, bid)
-    await c.answer("🏁 Battle tugadi!")
+        return await c.answer(B(b, "a_end_done"), show_alert=True)
+    await finish(bot, bid)
+    await c.answer(B(b, "a_end_ok"))
 
 
 @router.callback_query(F.data.startswith("who:"))
@@ -524,7 +721,7 @@ async def who(c: CallbackQuery, bot: Bot):
     if not b:
         return await c.answer()
     if not await is_chan_admin(bot, b["chat_id"], c.from_user.id):
-        return await c.answer("Bu tugma faqat kanal admini/egasi uchun 🔒", show_alert=True)
+        return await c.answer(B(b, "a_who_admin"), show_alert=True)
     out = []
     for p in standings(bid):
         voters = q("SELECT voter_id, voter_name FROM votes WHERE battle_id=? AND participant_id=?",
@@ -532,13 +729,13 @@ async def who(c: CallbackQuery, bot: Bot):
         names = ", ".join(f'<a href="tg://user?id={v["voter_id"]}">{html.escape(v["voter_name"])}</a>'
                           for v in voters) or "—"
         out.append(f"<b>{html.escape(p['name'])}</b> ({p['c']}):\n{names}")
-    text = "🗳 <b>Ovoz berganlar</b>\n\n" + ("\n\n".join(out) or "Hali ishtirokchi yo'q")
+    text = B(b, "who_title") + "\n\n" + ("\n\n".join(out) or B(b, "who_empty"))
     try:
         for i in range(0, len(text), 3800):
             await bot.send_message(c.from_user.id, text[i:i + 3800])
-        await c.answer("Ro'yxat shaxsiy xabarga yuborildi ✉️")
+        await c.answer(B(b, "a_who_ok"))
     except Exception:
-        await c.answer("Avval botga o'tib /start bosing, so'ng qayta urining", show_alert=True)
+        await c.answer(B(b, "a_who_fail"), show_alert=True)
 
 
 @router.chat_member()
@@ -547,7 +744,9 @@ async def on_member(u: ChatMemberUpdated, bot: Bot):
         return
     uid = u.new_chat_member.user.id
     rows = q("""SELECT v.battle_id FROM votes v JOIN battles b ON b.id=v.battle_id
-                WHERE v.voter_id=? AND b.chat_id=? AND b.finished=0""", uid, u.chat.id)
+                WHERE v.voter_id=? AND b.finished=0 AND (b.chat_id=? OR EXISTS(
+                  SELECT 1 FROM battle_channels bc WHERE bc.battle_id=b.id AND bc.chat_id=?))""",
+             uid, u.chat.id, u.chat.id)
     for r in rows:
         ex("DELETE FROM votes WHERE battle_id=? AND voter_id=?", r["battle_id"], uid)
         await refresh(bot, r["battle_id"])
@@ -571,17 +770,47 @@ async def on_my_member(u: ChatMemberUpdated, bot: Bot):
 
 
 async def sweeper(bot: Bot):
+    """Zaxira: har 10 daqiqada ovoz beruvchilar hamma kanalda a'zomi, tekshiradi."""
     while True:
         await asyncio.sleep(600)
         for b in q("SELECT * FROM battles WHERE finished=0"):
+            chs = [b["chat_id"]] + [e["chat_id"] for e in extras(b["id"])]
             changed = False
             for v in q("SELECT voter_id FROM votes WHERE battle_id=?", b["id"]):
-                if not await is_member(bot, b["chat_id"], v["voter_id"], default=True):
-                    ex("DELETE FROM votes WHERE battle_id=? AND voter_id=?", b["id"], v["voter_id"])
-                    changed = True
+                for ch in chs:
+                    if not await is_member(bot, ch, v["voter_id"], default=True):
+                        ex("DELETE FROM votes WHERE battle_id=? AND voter_id=?", b["id"], v["voter_id"])
+                        changed = True
+                        break
                 await asyncio.sleep(0.1)
             if changed:
                 await refresh(bot, b["id"])
+
+
+async def ender(bot: Bot):
+    """Vaqt bilan tugaydigan battlelarni avtomatik tugatadi."""
+    while True:
+        await asyncio.sleep(20)
+        try:
+            for r in q("""SELECT id FROM battles WHERE finished=0 AND end_type='time'
+                          AND end_ts>0 AND end_ts<=?""", int(time.time())):
+                await finish(bot, r["id"])
+        except Exception as e:
+            logging.warning("ender: %s", e)
+
+
+async def keepalive():
+    """Render bepul tarifida uxlab qolmasligi uchun o'zini chaqirib turadi."""
+    url = os.getenv("RENDER_EXTERNAL_URL")
+    if not url:
+        return
+    async with aiohttp.ClientSession() as s:
+        while True:
+            await asyncio.sleep(600)
+            try:
+                await s.get(url)
+            except Exception:
+                pass
 
 
 # ============================================================ /cancel (hamma uchun)
@@ -601,6 +830,17 @@ class Gift(StatesGroup):
     name = State()
     price = State()
     qty = State()
+
+
+class Wiz(StatesGroup):
+    name = State()
+    prize = State()
+    end = State()
+    end_time = State()
+    end_votes = State()
+    lang = State()
+    extra = State()
+    channel = State()
 
 
 @base.message(Command("cancel"))
@@ -760,20 +1000,33 @@ async def adm_cb(c: CallbackQuery, state: FSMContext):
             f"🚫 Banlangan: <b>{n('SELECT COUNT(*) n FROM users WHERE banned=1')}</b>\n"
             f"⛔️ Botni bloklaganlar: <b>{n('SELECT COUNT(*) n FROM users WHERE blocked=1')}</b>"), back)
     elif act == "battles":
-        rows = q("""SELECT b.chat_id, COUNT(DISTINCT b.id) bn, COUNT(v.voter_id) vn
-                    FROM battles b LEFT JOIN votes v ON v.battle_id=b.id
-                    GROUP BY b.chat_id ORDER BY vn DESC, bn DESC LIMIT 10""")
+        # faqat TUGATILGAN battlelar hisobga olinadi; top 3 kanal
+        rows = q("""SELECT b.chat_id, COUNT(*) bn,
+                    (SELECT COUNT(*) FROM votes v JOIN battles b2 ON b2.id=v.battle_id
+                     WHERE b2.chat_id=b.chat_id AND b2.finished=1) vn
+                    FROM battles b WHERE b.finished=1
+                    GROUP BY b.chat_id ORDER BY vn DESC, bn DESC LIMIT 3""")
         medals = ["🥇", "🥈", "🥉"]
         lines = []
         for i, r in enumerate(rows):
-            ch = q("SELECT title FROM chats WHERE chat_id=?", r["chat_id"])
-            title = html.escape(ch[0]["title"]) if ch and ch[0]["title"] else str(r["chat_id"])
-            lines.append(f"{medals[i] if i < 3 else str(i + 1) + '.'} <b>{title}</b>\n"
-                         f"   🥊 {r['bn']} ta battle · 🗳 {r['vn']} ta ovoz")
-        tb = q("SELECT COUNT(*) n FROM battles")[0]["n"]
-        tv = q("SELECT COUNT(*) n FROM votes")[0]["n"]
-        await show(c, f"🏆 <b>Ovoz battlelar</b>\n\nJami: 🥊 {tb} ta battle · 🗳 {tv} ta ovoz\n\n" +
-                   ("\n\n".join(lines) or "Hali battle yo'q."), back)
+            ch = q("SELECT title, username FROM chats WHERE chat_id=?", r["chat_id"])
+            if ch and ch[0]["username"]:
+                name = "@" + ch[0]["username"]
+            elif ch and ch[0]["title"]:
+                name = html.escape(ch[0]["title"])
+            else:
+                name = str(r["chat_id"])
+            lines.append(f"{medals[i]} <b>Kanal:</b> {name}\n"
+                         f"   🥊 Ovoz battle: <b>{r['bn']}</b> ta\n"
+                         f"   🗳 Ovoz soni: <b>{r['vn']}</b>")
+        tb = q("SELECT COUNT(*) n FROM battles WHERE finished=1")[0]["n"]
+        tv = q("""SELECT COUNT(*) n FROM votes v JOIN battles b ON b.id=v.battle_id
+                  WHERE b.finished=1""")[0]["n"]
+        await show(c, "🏆 <b>Ovoz battlelar</b>\n\n"
+                      f"✅ Tugatilgan ovoz battle: <b>{tb}</b> ta\n"
+                      f"🗳 Jami to'plangan ovoz: <b>{tv}</b>\n\n"
+                      "🔝 <b>Top 3 kanal:</b>\n\n" +
+                   ("\n\n".join(lines) or "Hali tugatilgan battle yo'q."), back)
     elif act == "chans":
         text, kb = chans_view()
         await show(c, text, kb)
@@ -885,19 +1138,284 @@ async def subchk(c: CallbackQuery, bot: Bot):
     await c.answer()
 
 
+# ---------------------------------------------------------------- BATTLE YARATISH (wizard)
+WZ = {
+    "uz": {
+        "name": "🏆 <b>Battle yaratish</b>\n\n📝 Battle nomini kiriting\n\nMisol:\n• Yozgi batl 🔥",
+        "prize": ("🎁 Sovrin matnini kiriting\n\nMisol:\n• 🥇 Top 1 ga gift\n\n"
+                  "Agar sovrin bo'lmasa \"-\" deb yuboring."),
+        "end": "🏁 Batl qanday tugasin?",
+        "b_time": "⏱ Vaqt bilan", "b_votes": "🎯 Ovoz soni bilan",
+        "time": ("⏱ Batl qachon tugasin? (Toshkent vaqti)\n\nMisol:\n"
+                 "• <code>20:30</code> — bugun (o'tib ketgan bo'lsa ertaga)\n"
+                 "• <code>25.11 20:30</code>\n• <code>25.11.2026 20:30</code>"),
+        "time_bad": "❌ Vaqt noto'g'ri yoki o'tib ketgan. Masalan: <code>25.11 20:30</code>",
+        "votes": ("🎯 Necha ovozga yetganda batl tugasin?\n\nKim birinchi shuncha ovoz yig'sa, "
+                  "batl avtomatik tugaydi.\nMisol: <code>5</code>"),
+        "votes_bad": "❌ Butun son yozing (1 dan katta yoki teng). Masalan: <code>5</code>",
+        "lang": "🌐 Kanaldagi batl posti qaysi tilda bo'lsin?\n\nTugmalar ham shu tilda chiqadi.",
+        "extra": ("📢 Ovoz berish va qatnashish uchun obuna bo'lish kerak bo'lgan majburiy kanallarni qo'shing.\n"
+                  "Batl o'tkaziladigan kanalga obuna bo'lish majburiy va sukut bo'yicha yoqilgan.\n\n"
+                  "Kanal qo'shish uchun:\n"
+                  "1. Botni (@{u}) kanalingizga administrator sifatida qo'shing (bot obunani tekshirishi uchun shart).\n"
+                  "2. Botga kanalni @kanalnomi ko'rinishida yuboring (yoki kanaldan xabarni forward qiling).\n\n"
+                  "Qo'shimcha kanal kerak bo'lmasa, quyidagi tugmani bosing 👇"),
+        "skip": "➡️ Qo'shimcha kanalsiz davom etish", "cont": "➡️ Davom etish",
+        "extra_ok": "✅ «{t}» qo'shildi.\n\nYana kanal yuboring yoki davom eting 👇",
+        "extra_dup": "ℹ️ Bu kanal allaqachon qo'shilgan.",
+        "extra_max": "❌ Ko'pi bilan 5 ta qo'shimcha kanal qo'shish mumkin.",
+        "not_admin": "❌ Bot «{t}» kanalida admin emas. Botni administrator qiling va kanalni qayta yuboring.",
+        "bad_chan": "❌ Kanal topilmadi. @kanalnomi ko'rinishida yuboring yoki kanaldan xabar forward qiling.",
+        "channel": ("📢 Kanal username kiriting:\n\nMisol: <code>@mystarchannel</code>\n\n"
+                    "Bot shu kanalda admin bo'lishi kerak, aks holda batl yuborilmaydi."),
+        "not_owner": "❌ Siz bu kanalning admini emassiz.",
+        "send_fail": "❌ Batlni yuborib bo'lmadi. Botga kanalda post yozish huquqini bering.\n<code>{e}</code>",
+        "done": "✅ <b>Battle yuborildi!</b>\n\n📢 Kanal: {t}\n🔗 {link}",
+    },
+    "ru": {
+        "name": "🏆 <b>Создать батл</b>\n\n📝 Введите название батла\n\nПример:\n• Летний батл 🔥",
+        "prize": ("🎁 Введите текст приза\n\nПример:\n• 🥇 Подарок за 1 место\n\n"
+                  "Если приза нет, отправьте \"-\"."),
+        "end": "🏁 Как завершится батл?",
+        "b_time": "⏱ По времени", "b_votes": "🎯 По числу голосов",
+        "time": ("⏱ Когда завершить батл? (время Ташкента)\n\nПример:\n"
+                 "• <code>20:30</code> — сегодня (если прошло, то завтра)\n"
+                 "• <code>25.11 20:30</code>\n• <code>25.11.2026 20:30</code>"),
+        "time_bad": "❌ Неверное время или оно уже прошло. Например: <code>25.11 20:30</code>",
+        "votes": ("🎯 При скольких голосах завершить батл?\n\nКто первым наберёт столько голосов, "
+                  "тот победит, батл завершится автоматически.\nПример: <code>5</code>"),
+        "votes_bad": "❌ Введите целое число (от 1). Например: <code>5</code>",
+        "lang": "🌐 На каком языке сделать пост батла в канале?\n\nКнопки тоже будут на этом языке.",
+        "extra": ("📢 Добавьте обязательные каналы, на которые нужно подписаться, чтобы голосовать и участвовать.\n"
+                  "Подписка на канал, где проходит батл, обязательна и включена по умолчанию.\n\n"
+                  "Чтобы добавить канал:\n"
+                  "1. Добавьте бота (@{u}) в канал как администратора (нужно для проверки подписки).\n"
+                  "2. Отправьте боту канал в виде @название (или перешлите сообщение из канала).\n\n"
+                  "Если дополнительные каналы не нужны, нажмите кнопку ниже 👇"),
+        "skip": "➡️ Продолжить без доп. каналов", "cont": "➡️ Продолжить",
+        "extra_ok": "✅ «{t}» добавлен.\n\nОтправьте ещё канал или продолжайте 👇",
+        "extra_dup": "ℹ️ Этот канал уже добавлен.",
+        "extra_max": "❌ Можно добавить не более 5 дополнительных каналов.",
+        "not_admin": "❌ Бот не админ в канале «{t}». Сделайте бота администратором и отправьте канал снова.",
+        "bad_chan": "❌ Канал не найден. Отправьте @название или перешлите сообщение из канала.",
+        "channel": ("📢 Введите username канала:\n\nПример: <code>@mystarchannel</code>\n\n"
+                    "Бот должен быть админом этого канала, иначе батл не отправится."),
+        "not_owner": "❌ Вы не админ этого канала.",
+        "send_fail": "❌ Не удалось отправить батл. Дайте боту право публиковать в канале.\n<code>{e}</code>",
+        "done": "✅ <b>Батл отправлен!</b>\n\n📢 Канал: {t}\n🔗 {link}",
+    },
+}
+
+
+def W(uid, key, **kw):
+    s = WZ[lang(uid)][key]
+    return s.format(**kw) if kw else s
+
+
+def parse_when(s: str):
+    """'20:30' | '25.11 20:30' | '25.11.2026 20:30' (Toshkent vaqti) -> timestamp yoki None."""
+    m = re.fullmatch(r"(?:(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?\s+)?(\d{1,2}):(\d{2})", s.strip())
+    if not m:
+        return None
+    d, mo, y, h, mi = m.groups()
+    now = datetime.now(TZ)
+    try:
+        if d:
+            dt = datetime(int(y) if y else now.year, int(mo), int(d), int(h), int(mi), tzinfo=TZ)
+            if not y and dt <= now:
+                dt = dt.replace(year=now.year + 1)
+        else:
+            dt = now.replace(hour=int(h), minute=int(mi), second=0, microsecond=0)
+            if dt <= now:
+                dt += timedelta(days=1)
+    except ValueError:
+        return None
+    return int(dt.timestamp()) if dt > now else None
+
+
+async def resolve_chat(bot: Bot, m: Message):
+    x = (m.text or "").strip()
+    if m.forward_origin and getattr(m.forward_origin, "chat", None):
+        x = m.forward_origin.chat.id
+    else:
+        x = re.sub(r"^https?://t\.me/", "", x).lstrip("@").split("/")[0]
+        if not x or re.search(r"\s", x):
+            return None
+        x = int(x) if x.lstrip("-").isdigit() else "@" + x
+    try:
+        return await bot.get_chat(x)
+    except Exception:
+        return None
+
+
+async def bot_is_admin(bot: Bot, chat_id) -> bool:
+    try:
+        me = await bot.get_chat_member(chat_id, bot.id)
+    except Exception:
+        return False
+    return me.status == S.ADMINISTRATOR
+
+
+async def wiz_cancel(m: Message, state: FSMContext) -> bool:
+    if m.text in ALL("b_cancel"):
+        await state.clear()
+        await m.answer(T(m.from_user.id, "cancelled"), reply_markup=main_kb(m.from_user.id))
+        return True
+    return False
+
+
 @router.message(F.text.in_(ALL("b_battle")))
-async def b_battle(m: Message):
+async def b_battle(m: Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(Wiz.name)
+    await m.answer(W(m.from_user.id, "name"), reply_markup=cancel_kb(m.from_user.id))
+
+
+@router.message(Wiz.name)
+async def wz_name(m: Message, state: FSMContext):
     uid = m.from_user.id
+    if await wiz_cancel(m, state):
+        return
+    if not m.text:
+        return await m.answer(W(uid, "name"))
+    await state.update_data(name=m.text.strip()[:80])
+    await state.set_state(Wiz.prize)
+    await m.answer(W(uid, "prize"))
+
+
+@router.message(Wiz.prize)
+async def wz_prize(m: Message, state: FSMContext):
+    uid = m.from_user.id
+    if await wiz_cancel(m, state):
+        return
+    if not m.text:
+        return await m.answer(W(uid, "prize"))
+    p = m.text.strip()
+    await state.update_data(prize="" if p == "-" else p[:200])
+    await state.set_state(Wiz.end)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[ib(W(uid, "b_time"), "wz:end:time")],
+                                               [ib(W(uid, "b_votes"), "wz:end:votes")]])
+    await m.answer(W(uid, "end"), reply_markup=kb)
+
+
+@router.callback_query(Wiz.end, F.data.startswith("wz:end:"))
+async def wz_end(c: CallbackQuery, state: FSMContext):
+    uid = c.from_user.id
+    kind = c.data.split(":")[2]
+    await c.answer()
+    await state.update_data(end_type=kind)
+    await state.set_state(Wiz.end_time if kind == "time" else Wiz.end_votes)
+    await c.message.answer(W(uid, "time" if kind == "time" else "votes"))
+
+
+async def ask_lang(msg: Message, uid, state: FSMContext):
+    await state.set_state(Wiz.lang)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[ib("🇺🇿 O'zbekcha", "wz:lang:uz"),
+                                               ib("🇷🇺 Русский", "wz:lang:ru"),
+                                               ib("🇬🇧 English", "wz:lang:en")]])
+    await msg.answer(W(uid, "lang"), reply_markup=kb)
+
+
+@router.message(Wiz.end_time)
+async def wz_time(m: Message, state: FSMContext):
+    uid = m.from_user.id
+    if await wiz_cancel(m, state):
+        return
+    ts = parse_when(m.text or "")
+    if not ts:
+        return await m.answer(W(uid, "time_bad"))
+    await state.update_data(end_ts=ts)
+    await ask_lang(m, uid, state)
+
+
+@router.message(Wiz.end_votes)
+async def wz_votes(m: Message, state: FSMContext):
+    uid = m.from_user.id
+    if await wiz_cancel(m, state):
+        return
+    t = (m.text or "").strip()
+    if not t.isdigit() or not (1 <= int(t) <= 1000000):
+        return await m.answer(W(uid, "votes_bad"))
+    await state.update_data(end_votes=int(t))
+    await ask_lang(m, uid, state)
+
+
+@router.callback_query(Wiz.lang, F.data.startswith("wz:lang:"))
+async def wz_lang(c: CallbackQuery, state: FSMContext):
+    uid = c.from_user.id
+    await c.answer()
+    await state.update_data(lang=c.data.split(":")[2], extras=[])
+    await state.set_state(Wiz.extra)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[ib(W(uid, "skip"), "wz:skip")]])
+    await c.message.answer(W(uid, "extra", u=UNAME), reply_markup=kb)
+
+
+@router.message(Wiz.extra)
+async def wz_extra(m: Message, state: FSMContext, bot: Bot):
+    uid = m.from_user.id
+    if await wiz_cancel(m, state):
+        return
+    chat = await resolve_chat(bot, m)
+    if not chat or chat.type not in ("channel", "supergroup"):
+        return await m.answer(W(uid, "bad_chan"))
+    if not await bot_is_admin(bot, chat.id):
+        return await m.answer(W(uid, "not_admin", t=html.escape(chat.title or "")))
+    d = await state.get_data()
+    lst = d.get("extras", [])
+    if any(e["chat_id"] == chat.id for e in lst):
+        return await m.answer(W(uid, "extra_dup"))
+    if len(lst) >= 5:
+        return await m.answer(W(uid, "extra_max"))
+    try:
+        link = await chat_link(bot, chat.id)
+    except Exception:
+        return await m.answer(W(uid, "not_admin", t=html.escape(chat.title or "")))
+    lst.append({"chat_id": chat.id, "title": chat.title or str(chat.id), "link": link})
+    await state.update_data(extras=lst)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[ib(W(uid, "cont"), "wz:skip")]])
+    await m.answer(W(uid, "extra_ok", t=html.escape(chat.title or "")), reply_markup=kb)
+
+
+@router.callback_query(Wiz.extra, F.data == "wz:skip")
+async def wz_skip(c: CallbackQuery, state: FSMContext):
+    uid = c.from_user.id
+    await c.answer()
+    await state.set_state(Wiz.channel)
     url = (f"https://t.me/{UNAME}?startchannel&admin=post_messages+edit_messages"
            "+delete_messages+invite_users")
-    await m.answer(T(uid, "battle_info"),
-                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[[ib(T(uid, "add_ch"), url=url)]]))
+    kb = InlineKeyboardMarkup(inline_keyboard=[[ib(T(uid, "add_ch"), url=url)]])
+    await c.message.answer(W(uid, "channel"), reply_markup=kb)
+
+
+@router.message(Wiz.channel)
+async def wz_channel(m: Message, state: FSMContext, bot: Bot):
+    uid = m.from_user.id
+    if await wiz_cancel(m, state):
+        return
+    chat = await resolve_chat(bot, m)
+    if not chat or chat.type != "channel":
+        return await m.answer(W(uid, "bad_chan"))
+    if not await bot_is_admin(bot, chat.id):
+        return await m.answer(W(uid, "not_admin", t=html.escape(chat.title or "")))
+    if not await is_chan_admin(bot, chat.id, uid):
+        return await m.answer(W(uid, "not_owner"))
+    d = await state.get_data()
+    try:
+        _, mid = await create_battle(
+            bot, chat, owner=uid, name=d.get("name", ""), prize=d.get("prize", ""),
+            lang=d.get("lang", "uz"), end_type=d.get("end_type", ""), end_ts=d.get("end_ts", 0),
+            end_votes=d.get("end_votes", 0), ext=d.get("extras", []))
+    except Exception as e:
+        return await m.answer(W(uid, "send_fail", e=html.escape(str(e))[:200]))
+    await state.clear()
+    await m.answer(W(uid, "done", t=html.escape(chat.title or ""),
+                     link=msg_link(chat.id, chat.username, mid)), reply_markup=main_kb(uid))
 
 
 @router.message(F.text.in_(ALL("b_my")))
 async def b_my(m: Message):
     uid = m.from_user.id
-    rows = q("""SELECT b.id,b.chat_id,b.message_id,b.finished,c.title,c.username,
+    rows = q("""SELECT b.id,b.chat_id,b.message_id,b.finished,b.name,c.title,c.username,
                 (SELECT COUNT(*) FROM participants p WHERE p.battle_id=b.id) pn,
                 (SELECT COUNT(*) FROM votes v WHERE v.battle_id=b.id) vn
                 FROM battles b JOIN chats c ON c.chat_id=b.chat_id
@@ -907,7 +1425,7 @@ async def b_my(m: Message):
     kb = InlineKeyboardBuilder()
     text = T(uid, "my_head")
     for r in rows:
-        text += (f"{'🏁' if r['finished'] else '🟢'} <b>#{r['id']}</b> — {html.escape(r['title'] or '')}\n"
+        text += (f"{'🏁' if r['finished'] else '🟢'} <b>#{r['id']}</b> — {html.escape(r['name'] or r['title'] or '')}\n"
                  f"👥 {r['pn']} · 🗳 {r['vn']}\n\n")
         if r["message_id"]:
             kb.row(ib(f"#{r['id']} → {(r['title'] or '')[:25]}",
@@ -1045,6 +1563,8 @@ async def main():
     await web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", "8080"))).start()
 
     asyncio.create_task(sweeper(bot))
+    asyncio.create_task(ender(bot))
+    asyncio.create_task(keepalive())
     await bot.delete_webhook(drop_pending_updates=False)
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
