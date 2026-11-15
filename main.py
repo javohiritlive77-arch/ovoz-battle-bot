@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO)
 
 # ============================================================ SOZLAMALAR
 BOT_TOKEN = os.getenv("BOT_TOKEN") or "BU_YERGA_TOKEN_YOZING"
-ADMIN_ID = int(os.getenv("ADMIN_ID", "8327302562"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "7676544759"))
 DB_PATH = os.getenv("DB_PATH", "battle.db")      # Render: Disk ulab /data/battle.db
 DAILY_BONUS = 5
 REF_BONUS = 15
