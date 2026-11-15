@@ -27,7 +27,7 @@ logging.basicConfig(level=logging.INFO)
 
 # ============================================================ SOZLAMALAR
 BOT_TOKEN = os.getenv("BOT_TOKEN") or "BU_YERGA_TOKEN_YOZING"
-ADMIN_ID = int(os.getenv("ADMIN_ID", "8327302562"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "7676544759"))
 DB_PATH = os.getenv("DB_PATH", "battle.db")      # Render: Disk ulab /data/battle.db
 DAILY_BONUS = 5
 REF_BONUS = 15
@@ -392,14 +392,27 @@ async def is_member(bot: Bot, chat_id, uid, default=False) -> bool:
     return m.status == S.RESTRICTED and getattr(m, "is_member", False)
 
 
-async def is_chan_admin(bot: Bot, chat_id, uid) -> bool:
+async def can_view_battle_votes(bot: Bot, chat_id, uid) -> bool:
+    """Ovozlar ro'yxatini faqat bot egasi, kanal egasi yoki kanal adminiga ochadi."""
     if uid == ADMIN_ID:
         return True
+
+    # Battle yaratilganda saqlangan kanal egasi ham huquqqa ega.
+    row = q("SELECT owner_id FROM chats WHERE chat_id=?", chat_id)
+    if row and row[0]["owner_id"] and int(row[0]["owner_id"]) == uid:
+        return True
+
+    # Eng ishonchli tekshiruv — Telegram'dagi hozirgi kanal admin/egasi holati.
     try:
-        m = await bot.get_chat_member(chat_id, uid)
-    except TelegramBadRequest:
+        member = await bot.get_chat_member(chat_id, uid)
+    except (TelegramBadRequest, TelegramForbiddenError):
         return False
-    return m.status in (S.CREATOR, S.ADMINISTRATOR)
+    return member.status in (S.CREATOR, S.ADMINISTRATOR)
+
+
+async def is_chan_admin(bot: Bot, chat_id, uid) -> bool:
+    """Battle boshqaruvi uchun kanal admini yoki bot egasini tekshiradi."""
+    return await can_view_battle_votes(bot, chat_id, uid)
 
 
 async def chat_link(bot: Bot, chat_id) -> str:
@@ -568,6 +581,10 @@ def keyboard(b) -> InlineKeyboardMarkup:
     for r in standings(bid):
         vote_link = f"https://t.me/{UNAME}?start=v{bid}_{r['user_id']}"
         kb.row(ib(f"🗳 {r['name'][:26]} — {r['c']}", url=vote_link))
+    # Kanal admini ovoz berganlar ro'yxatini ko'rishi mumkin.
+    # Tugma orqali qaysi foydalanuvchi qaysi ishtirokchiga ovoz bergani
+    # botning shaxsiy chatiga yuboriladi.
+    kb.row(ib(B(L, "b_who"), f"who:{bid}"))
     if b["finished"]:
         kb.row(ib(B(L, "b_done"), f"done:{bid}"))
     else:
@@ -748,8 +765,9 @@ async def who(c: CallbackQuery, bot: Bot):
     b = battle(bid)
     if not b:
         return await c.answer()
-    if not await is_chan_admin(bot, b["chat_id"], c.from_user.id):
-        return await c.answer(B(b, "a_who_admin"), show_alert=True)
+    # Faqat shu kanalning egasi yoki amaldagi admini ovozlar ro'yxatini ko'ra oladi.
+    if not await can_view_battle_votes(bot, b["chat_id"], c.from_user.id):
+        return await c.answer("⛔ Bu ro'yxat faqat battle joylangan kanal egasi yoki admini uchun.", show_alert=True)
     out = []
     for p in standings(bid):
         voters = q("SELECT voter_id, voter_name FROM votes WHERE battle_id=? AND participant_id=?",
