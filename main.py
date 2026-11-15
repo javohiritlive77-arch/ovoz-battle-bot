@@ -27,7 +27,7 @@ logging.basicConfig(level=logging.INFO)
 
 # ============================================================ SOZLAMALAR
 BOT_TOKEN = os.getenv("BOT_TOKEN") or "BU_YERGA_TOKEN_YOZING"
-ADMIN_ID = int(os.getenv("ADMIN_ID", "7676544759"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "8327302562"))
 DB_PATH = os.getenv("DB_PATH", "battle.db")      # Render: Disk ulab /data/battle.db
 DAILY_BONUS = 5
 REF_BONUS = 15
@@ -42,6 +42,7 @@ admin.callback_query.filter(F.from_user.id == ADMIN_ID)
 UNAME = ""
 LINKS: dict[int, str] = {}
 TASKS: set = set()
+PENDING: dict[int, int] = {}      # obuna bo'lgach davom ettiriladigan battle qatnashuvi
 
 # ============================================================ MATNLAR (uz / ru)
 TX = {
@@ -384,7 +385,7 @@ def mention(uid, name, username="") -> str:
 async def is_member(bot: Bot, chat_id, uid, default=False) -> bool:
     try:
         m = await bot.get_chat_member(chat_id, uid)
-    except TelegramBadRequest:
+    except (TelegramBadRequest, TelegramForbiddenError):
         return default
     if m.status in (S.CREATOR, S.ADMINISTRATOR, S.MEMBER):
         return True
@@ -450,7 +451,7 @@ def cancel_kb(uid) -> ReplyKeyboardMarkup:
 async def missing_channels(bot: Bot, uid):
     out = []
     for r in q("SELECT * FROM req_channels"):
-        if not await is_member(bot, r["chat_id"], uid, default=True):
+        if not await is_member(bot, r["chat_id"], uid):
             out.append(r)
     return out
 
@@ -497,12 +498,14 @@ class Gate(BaseMiddleware):
             if isinstance(event, CallbackQuery):
                 await event.answer()
             return
-        if isinstance(event, Message) and re.match(r"^/start b\d+", event.text or ""):
-            return await handler(event, data)
         if isinstance(event, CallbackQuery) and (event.data == "subchk" or event.data.startswith("chk:")):
             return await handler(event, data)
         miss = await missing_channels(bot, user.id)
         if miss:
+            if isinstance(event, Message):
+                mb = re.match(r"^/start b(\d+)", event.text or "")
+                if mb:
+                    PENDING[user.id] = int(mb.group(1))
             await send_sub_prompt(bot, msg.chat.id, user.id, miss)
             if isinstance(event, CallbackQuery):
                 await event.answer()
@@ -559,13 +562,16 @@ def keyboard(b) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     if not b["finished"]:
         kb.row(ib(B(L, "b_join"), url=f"https://t.me/{UNAME}?start=b{bid}"))
+    # Ovoz berish tugmasi kanal ichida callback qilmaydi.
+    # Foydalanuvchi tugmani bosganda botning shaxsiy chatiga o'tadi va /start
+    # deep-link orqali ovoz berish sahifasi ochiladi.
     for r in standings(bid):
-        kb.row(ib(f"{r['name'][:30]} ({r['c']})", f"v:{bid}:{r['user_id']}"))
+        vote_link = f"https://t.me/{UNAME}?start=v{bid}_{r['user_id']}"
+        kb.row(ib(f"🗳 {r['name'][:26]} — {r['c']}", url=vote_link))
     if b["finished"]:
         kb.row(ib(B(L, "b_done"), f"done:{bid}"))
     else:
         kb.row(ib(B(L, "b_end"), f"end:{bid}"))
-    kb.row(ib(B(L, "b_who"), f"who:{bid}"))
     return kb.as_markup()
 
 
@@ -643,7 +649,7 @@ async def missing_for(bot: Bot, b, uid):
     if not await is_member(bot, b["chat_id"], uid):
         out.append(await chan_info(bot, b["chat_id"]))
     for e in extras(b["id"]):
-        if not await is_member(bot, e["chat_id"], uid, default=True):
+        if not await is_member(bot, e["chat_id"], uid):
             out.append({"title": e["title"], "link": e["link"]})
     return out
 
@@ -671,6 +677,27 @@ async def check(c: CallbackQuery, bot: Bot):
     text, kb = await try_join(bot, c.from_user, int(c.data.split(":")[1]))
     await c.message.edit_text(text, reply_markup=kb)
     await c.answer()
+
+
+@router.callback_query(F.data.startswith("votechk:"))
+async def vote_check(c: CallbackQuery, bot: Bot):
+    _, bid, pid = c.data.split(":")
+    bid, pid = int(bid), int(pid)
+    b = battle(bid)
+    if not b or b["finished"]:
+        return await c.answer(B(b or "uz", "a_ended"), show_alert=True)
+    miss = await missing_for(bot, b, c.from_user.id)
+    if miss:
+        return await c.answer(B(b, "a_need", c=", ".join(i["title"] for i in miss)[:100]), show_alert=True)
+    if q("SELECT 1 FROM votes WHERE battle_id=? AND voter_id=?", bid, c.from_user.id):
+        return await c.answer(B(b, "a_voted"), show_alert=True)
+    ex("INSERT INTO votes VALUES(?,?,?,?)", bid, c.from_user.id, c.from_user.full_name, pid)
+    await c.answer(B(b, "a_ok"), show_alert=True)
+    await c.message.edit_text(B(b, "a_ok"))
+    if b["end_type"] == "votes" and b["end_votes"] and standings(bid)[0]["c"] >= b["end_votes"]:
+        await finish(bot, bid)
+    else:
+        await refresh(bot, bid)
 
 
 @router.callback_query(F.data.startswith("v:"))
@@ -1122,6 +1149,35 @@ async def start(m: Message, command: CommandObject, bot: Bot, state: FSMContext)
     if re.fullmatch(r"b\d+", arg):
         text, kb = await try_join(bot, m.from_user, int(arg[1:]))
         return await m.answer(text, reply_markup=kb)
+
+    # Kanal postidagi 🗳 Ovoz berish tugmasi shu deep-link orqali botga olib keladi.
+    # Avval /start ishlaydi, keyin ovoz berish tekshiruvlari bajariladi.
+    vm = re.fullmatch(r"v(\d+)_(\d+)", arg)
+    if vm:
+        bid, pid = map(int, vm.groups())
+        b = battle(bid)
+        if not b or b["finished"]:
+            return await m.answer(B(b or "uz", "a_ended"), reply_markup=main_kb(uid))
+        if not q("SELECT 1 FROM participants WHERE battle_id=? AND user_id=?", bid, pid):
+            return await m.answer(B(b, "a_nopart"), reply_markup=main_kb(uid))
+        miss = await missing_for(bot, b, uid)
+        if miss:
+            kb = InlineKeyboardBuilder()
+            for item in miss:
+                if item["link"]:
+                    kb.row(ib(f"📢 {item['title']}", url=item["link"]))
+            kb.row(ib(B(b, "j_check"), f"votechk:{bid}:{pid}"))
+            return await m.answer(B(b, "j_need"), reply_markup=kb.as_markup())
+        if q("SELECT 1 FROM votes WHERE battle_id=? AND voter_id=?", bid, uid):
+            return await m.answer(B(b, "a_voted"), reply_markup=main_kb(uid))
+        ex("INSERT INTO votes VALUES(?,?,?,?)", bid, uid, m.from_user.full_name, pid)
+        await m.answer(B(b, "a_ok"), reply_markup=main_kb(uid))
+        if b["end_type"] == "votes" and b["end_votes"] and standings(bid)[0]["c"] >= b["end_votes"]:
+            await finish(bot, bid)
+        else:
+            await refresh(bot, bid)
+        return
+
     await m.answer(T(uid, "welcome"), reply_markup=main_kb(uid))
 
 
@@ -1136,6 +1192,10 @@ async def subchk(c: CallbackQuery, bot: Bot):
     except TelegramBadRequest:
         pass
     await c.message.answer(T(uid, "sub_ok"), reply_markup=main_kb(uid))
+    bid = PENDING.pop(uid, None)
+    if bid:
+        text, kb = await try_join(bot, c.from_user, bid)
+        await c.message.answer(text, reply_markup=kb)
     await c.answer()
 
 
@@ -1420,7 +1480,8 @@ async def b_my(m: Message):
                 (SELECT COUNT(*) FROM participants p WHERE p.battle_id=b.id) pn,
                 (SELECT COUNT(*) FROM votes v WHERE v.battle_id=b.id) vn
                 FROM battles b JOIN chats c ON c.chat_id=b.chat_id
-                WHERE c.owner_id=? ORDER BY b.id DESC LIMIT 10""", uid)
+                WHERE (c.owner_id=? OR ?=1) ORDER BY b.id DESC LIMIT 10""",
+            uid, 1 if uid == ADMIN_ID else 0)
     if not rows:
         return await m.answer(T(uid, "my_none"))
     kb = InlineKeyboardBuilder()
@@ -1428,9 +1489,12 @@ async def b_my(m: Message):
     for r in rows:
         text += (f"{'🏁' if r['finished'] else '🟢'} <b>#{r['id']}</b> — {html.escape(r['name'] or r['title'] or '')}\n"
                  f"👥 {r['pn']} · 🗳 {r['vn']}\n\n")
+        row = []
         if r["message_id"]:
-            kb.row(ib(f"#{r['id']} → {(r['title'] or '')[:25]}",
-                      url=msg_link(r["chat_id"], r["username"], r["message_id"])))
+            row.append(ib(f"#{r['id']} → {(r['title'] or '')[:18]}",
+                          url=msg_link(r["chat_id"], r["username"], r["message_id"])))
+        row.append(ib(f"🗳 #{r['id']}", f"who:{r['id']}"))
+        kb.row(*row)
     await m.answer(text, reply_markup=kb.as_markup())
 
 
