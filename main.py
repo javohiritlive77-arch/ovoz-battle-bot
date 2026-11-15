@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 import time
+from urllib.parse import quote
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -1540,7 +1541,8 @@ async def b_invite(m: Message):
     uid = m.from_user.id
     link = f"https://t.me/{UNAME}?start=r{uid}"
     n = q("SELECT COUNT(*) n FROM users WHERE ref_by=? AND rewarded=1", uid)[0]["n"]
-    share = f"https://t.me/share/url?url={link}&text={T(uid, 'share_text')}"
+    share = ("https://t.me/share/url?url=" + quote(link, safe="") +
+             "&text=" + quote(T(uid, 'share_text'), safe=""))
     await m.answer(T(uid, "invite", r=REF_BONUS, link=link, n=n),
                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[ib(T(uid, "share_btn"), url=share)]]))
 
