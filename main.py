@@ -28,7 +28,7 @@ logging.basicConfig(level=logging.INFO)
 
 # ============================================================ SOZLAMALAR
 BOT_TOKEN = os.getenv("BOT_TOKEN") or "BU_YERGA_TOKEN_YOZING"
-ADMIN_ID = int(os.getenv("ADMIN_ID", "8327302562"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "7676544759"))
 # Doimiy saqlash: Render kabi hostingda /data diskini ulab DB_PATH=/data/battle.db qiling.
 # /data mavjud bo'lsa shu joy tanlanadi; eski lokal battle.db bo'lsa birinchi ishga tushishda ko'chiriladi.
 _default_db = "/data/battle.db" if os.path.isdir("/data") else "battle.db"
