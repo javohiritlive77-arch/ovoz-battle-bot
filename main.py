@@ -4,8 +4,9 @@ import logging
 import os
 import re
 import sqlite3
+import json
 import time
-from pathlib import Path
+import urllib.request
 from urllib.parse import quote
 from datetime import datetime, timedelta, timezone
 
@@ -21,7 +22,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (CallbackQuery, ChatMemberUpdated, InlineKeyboardButton,
                            InlineKeyboardMarkup, KeyboardButton, Message,
-                           ReplyKeyboardMarkup)
+                           ReplyKeyboardMarkup, FSInputFile)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 logging.basicConfig(level=logging.INFO)
@@ -29,25 +30,7 @@ logging.basicConfig(level=logging.INFO)
 # ============================================================ SOZLAMALAR
 BOT_TOKEN = os.getenv("BOT_TOKEN") or "BU_YERGA_TOKEN_YOZING"
 ADMIN_ID = int(os.getenv("ADMIN_ID", "7676544759"))
-# Doimiy saqlash: Render kabi hostingda /data diskini ulab DB_PATH=/data/battle.db qiling.
-# /data mavjud bo'lsa shu joy tanlanadi; eski lokal battle.db bo'lsa birinchi ishga tushishda ko'chiriladi.
-_default_db = "/data/battle.db" if os.path.isdir("/data") else "battle.db"
-DB_PATH = os.getenv("DB_PATH", _default_db)
-_db_parent = os.path.dirname(os.path.abspath(DB_PATH))
-os.makedirs(_db_parent, exist_ok=True)
-
-# Agar eski versiya battle.db faylida ishlagan bo'lsa, yangi joyga xavfsiz ko'chiramiz.
-# SQLite backup API WAL jurnalidagi oxirgi yozuvlarni ham hisobga oladi.
-_legacy_db = os.path.abspath("battle.db")
-_target_db = os.path.abspath(DB_PATH)
-if _target_db != _legacy_db and not os.path.exists(_target_db) and os.path.isfile(_legacy_db):
-    try:
-        with sqlite3.connect(_legacy_db) as _old_conn, sqlite3.connect(_target_db) as _new_conn:
-            _old_conn.backup(_new_conn)
-        logging.info("Eski baza yangi joyga ko'chirildi: %s", _target_db)
-    except Exception:
-        logging.exception("Eski bazani ko'chirishda xato")
-        raise
+DB_PATH = os.getenv("DB_PATH", "battle.db")      # Render: Disk ulab /data/battle.db
 DAILY_BONUS = 5
 REF_BONUS = 15
 TZ = timezone(timedelta(hours=5))                 # Toshkent vaqti
@@ -325,40 +308,34 @@ def B(x, key, **kw):
 
 
 # ============================================================ DB
+def restore_db():
+    """Baza fayli yo'q bo'lsa (Render qayta yoqilganda), oxirgi zaxirani Telegramdan tiklaydi."""
+    if os.path.exists(DB_PATH) and os.path.getsize(DB_PATH) > 0:
+        return
+    chat = os.getenv("BACKUP_CHAT_ID") or str(ADMIN_ID)
+    api = f"https://api.telegram.org/bot{BOT_TOKEN}"
+    for attempt in range(3):
+        try:
+            r = json.load(urllib.request.urlopen(f"{api}/getChat?chat_id={chat}", timeout=20))
+            doc = (r["result"].get("pinned_message") or {}).get("document")
+            if not doc:
+                print("restore: zaxira topilmadi (yangi baza)")
+                return
+            f = json.load(urllib.request.urlopen(f"{api}/getFile?file_id={doc['file_id']}", timeout=20))
+            data = urllib.request.urlopen(
+                f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f['result']['file_path']}", timeout=60).read()
+            with open(DB_PATH, "wb") as fh:
+                fh.write(data)
+            print("restore: baza tiklandi", len(data), "bayt")
+            return
+        except Exception as e:
+            print("restore xato:", e)
+            time.sleep(3)
+
+
+restore_db()
 db = sqlite3.connect(DB_PATH, check_same_thread=False)
 db.row_factory = sqlite3.Row
-db.execute("PRAGMA journal_mode=WAL")
-db.execute("PRAGMA synchronous=FULL")
-db.execute("PRAGMA foreign_keys=ON")
-
-
-def backup_database(tag="auto"):
-    """SQLite snapshotini alohida faylga yozadi; asosiy bazaga tegmaydi."""
-    backup_dir = DB_PATH + ".backups"
-    os.makedirs(backup_dir, exist_ok=True)
-    stamp = datetime.now(TZ).strftime("%Y%m%d_%H%M%S")
-    final_path = os.path.join(backup_dir, f"battle_{tag}_{stamp}.db")
-    temp_path = final_path + ".tmp"
-    try:
-        with sqlite3.connect(temp_path) as target:
-            db.backup(target)
-        os.replace(temp_path, final_path)
-        # Oxirgi 30 ta nusxani saqlaymiz.
-        files = sorted(Path(backup_dir).glob("battle_*.db"), key=lambda x: x.stat().st_mtime)
-        for old in files[:-30]:
-            old.unlink(missing_ok=True)
-        logging.info("Database backup created: %s", final_path)
-        return final_path
-    except Exception:
-        logging.exception("Database backup failed")
-        try:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-        except OSError:
-            pass
-        return None
-
-
 db.executescript("""
 CREATE TABLE IF NOT EXISTS battles(
   id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, message_id INTEGER DEFAULT 0,
@@ -388,9 +365,6 @@ for _col in ("name TEXT DEFAULT ''", "prize TEXT DEFAULT ''", "lang TEXT DEFAULT
         db.commit()
     except sqlite3.OperationalError:
         pass
-
-# Schema yangilangandan keyin bazaning zaxira nusxasini olamiz.
-backup_database("startup")
 
 
 def ex(sql, *args):
@@ -446,27 +420,14 @@ async def is_member(bot: Bot, chat_id, uid, default=False) -> bool:
     return m.status == S.RESTRICTED and getattr(m, "is_member", False)
 
 
-async def can_view_battle_votes(bot: Bot, chat_id, uid) -> bool:
-    """Ovozlar ro'yxatini faqat bot egasi, kanal egasi yoki kanal adminiga ochadi."""
+async def is_chan_admin(bot: Bot, chat_id, uid) -> bool:
     if uid == ADMIN_ID:
         return True
-
-    # Battle yaratilganda saqlangan kanal egasi ham huquqqa ega.
-    row = q("SELECT owner_id FROM chats WHERE chat_id=?", chat_id)
-    if row and row[0]["owner_id"] and int(row[0]["owner_id"]) == uid:
-        return True
-
-    # Eng ishonchli tekshiruv — Telegram'dagi hozirgi kanal admin/egasi holati.
     try:
-        member = await bot.get_chat_member(chat_id, uid)
-    except (TelegramBadRequest, TelegramForbiddenError):
+        m = await bot.get_chat_member(chat_id, uid)
+    except TelegramBadRequest:
         return False
-    return member.status in (S.CREATOR, S.ADMINISTRATOR)
-
-
-async def is_chan_admin(bot: Bot, chat_id, uid) -> bool:
-    """Battle boshqaruvi uchun kanal admini yoki bot egasini tekshiradi."""
-    return await can_view_battle_votes(bot, chat_id, uid)
+    return m.status in (S.CREATOR, S.ADMINISTRATOR)
 
 
 async def chat_link(bot: Bot, chat_id) -> str:
@@ -629,16 +590,8 @@ def keyboard(b) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     if not b["finished"]:
         kb.row(ib(B(L, "b_join"), url=f"https://t.me/{UNAME}?start=b{bid}"))
-    # Ovoz berish tugmasi kanal ichida callback qilmaydi.
-    # Foydalanuvchi tugmani bosganda botning shaxsiy chatiga o'tadi va /start
-    # deep-link orqali ovoz berish sahifasi ochiladi.
     for r in standings(bid):
-        vote_link = f"https://t.me/{UNAME}?start=v{bid}_{r['user_id']}"
-        kb.row(ib(f"🗳 {r['name'][:26]} — {r['c']}", url=vote_link))
-    # Kanal admini ovoz berganlar ro'yxatini ko'rishi mumkin.
-    # Tugma orqali qaysi foydalanuvchi qaysi ishtirokchiga ovoz bergani
-    # botning shaxsiy chatiga yuboriladi.
-    kb.row(ib(B(L, "b_who"), f"who:{bid}"))
+        kb.row(ib(f"{r['name'][:30]} ({r['c']})", f"v:{bid}:{r['user_id']}"))
     if b["finished"]:
         kb.row(ib(B(L, "b_done"), f"done:{bid}"))
     else:
@@ -750,27 +703,6 @@ async def check(c: CallbackQuery, bot: Bot):
     await c.answer()
 
 
-@router.callback_query(F.data.startswith("votechk:"))
-async def vote_check(c: CallbackQuery, bot: Bot):
-    _, bid, pid = c.data.split(":")
-    bid, pid = int(bid), int(pid)
-    b = battle(bid)
-    if not b or b["finished"]:
-        return await c.answer(B(b or "uz", "a_ended"), show_alert=True)
-    miss = await missing_for(bot, b, c.from_user.id)
-    if miss:
-        return await c.answer(B(b, "a_need", c=", ".join(i["title"] for i in miss)[:100]), show_alert=True)
-    if q("SELECT 1 FROM votes WHERE battle_id=? AND voter_id=?", bid, c.from_user.id):
-        return await c.answer(B(b, "a_voted"), show_alert=True)
-    ex("INSERT INTO votes VALUES(?,?,?,?)", bid, c.from_user.id, c.from_user.full_name, pid)
-    await c.answer(B(b, "a_ok"), show_alert=True)
-    await c.message.edit_text(B(b, "a_ok"))
-    if b["end_type"] == "votes" and b["end_votes"] and standings(bid)[0]["c"] >= b["end_votes"]:
-        await finish(bot, bid)
-    else:
-        await refresh(bot, bid)
-
-
 @router.callback_query(F.data.startswith("v:"))
 async def vote(c: CallbackQuery, bot: Bot):
     _, bid, pid = c.data.split(":")
@@ -819,9 +751,8 @@ async def who(c: CallbackQuery, bot: Bot):
     b = battle(bid)
     if not b:
         return await c.answer()
-    # Faqat shu kanalning egasi yoki amaldagi admini ovozlar ro'yxatini ko'ra oladi.
-    if not await can_view_battle_votes(bot, b["chat_id"], c.from_user.id):
-        return await c.answer("⛔ Bu ro'yxat faqat battle joylangan kanal egasi yoki admini uchun.", show_alert=True)
+    if not await is_chan_admin(bot, b["chat_id"], c.from_user.id):
+        return await c.answer(B(b, "a_who_admin"), show_alert=True)
     out = []
     for p in standings(bid):
         voters = q("SELECT voter_id, voter_name FROM votes WHERE battle_id=? AND participant_id=?",
@@ -844,7 +775,7 @@ async def on_member(u: ChatMemberUpdated, bot: Bot):
         return
     uid = u.new_chat_member.user.id
     rows = q("""SELECT v.battle_id FROM votes v JOIN battles b ON b.id=v.battle_id
-                WHERE v.voter_id=? AND (b.chat_id=? OR EXISTS(
+                WHERE v.voter_id=? AND b.finished=0 AND (b.chat_id=? OR EXISTS(
                   SELECT 1 FROM battle_channels bc WHERE bc.battle_id=b.id AND bc.chat_id=?))""",
              uid, u.chat.id, u.chat.id)
     for r in rows:
@@ -869,11 +800,43 @@ async def on_my_member(u: ChatMemberUpdated, bot: Bot):
             pass
 
 
+BACKUP = {"changes": 0, "msg": None}
+
+
+async def backup_loop(bot: Bot):
+    """Baza o'zgarsa, har 60 soniyada nusxasini Telegramga yuborib pin qiladi."""
+    chat = int(os.getenv("BACKUP_CHAT_ID") or ADMIN_ID)
+    while True:
+        await asyncio.sleep(60)
+        ch = db.total_changes
+        if ch == BACKUP["changes"]:
+            continue
+        try:
+            tmp = DB_PATH + ".bak"
+            dst = sqlite3.connect(tmp)
+            db.backup(dst)
+            dst.close()
+            m = await bot.send_document(chat, FSInputFile(tmp, filename="battle.db"),
+                                        caption="💾 Baza zaxirasi (o'chirmang!)", disable_notification=True)
+            try:
+                await bot.pin_chat_message(chat, m.message_id, disable_notification=True)
+            except Exception as e:
+                logging.warning("pin xato: %s", e)
+            if BACKUP["msg"]:
+                try:
+                    await bot.delete_message(chat, BACKUP["msg"])
+                except Exception:
+                    pass
+            BACKUP.update(changes=ch, msg=m.message_id)
+        except Exception as e:
+            logging.warning("backup xato: %s", e)
+
+
 async def sweeper(bot: Bot):
-    """Zaxira: har 10 daqiqada barcha battlelardagi ovoz beruvchilar obunasini tekshiradi."""
+    """Zaxira: har 10 daqiqada ovoz beruvchilar hamma kanalda a'zomi, tekshiradi."""
     while True:
         await asyncio.sleep(600)
-        for b in q("SELECT * FROM battles"):
+        for b in q("SELECT * FROM battles WHERE finished=0"):
             chs = [b["chat_id"]] + [e["chat_id"] for e in extras(b["id"])]
             changed = False
             for v in q("SELECT voter_id FROM votes WHERE battle_id=?", b["id"]):
@@ -1100,13 +1063,11 @@ async def adm_cb(c: CallbackQuery, state: FSMContext):
             f"🚫 Banlangan: <b>{n('SELECT COUNT(*) n FROM users WHERE banned=1')}</b>\n"
             f"⛔️ Botni bloklaganlar: <b>{n('SELECT COUNT(*) n FROM users WHERE blocked=1')}</b>"), back)
     elif act == "battles":
-        # Barcha battlelar: hozir davom etayotganlari ham, tugaganlari ham hisoblanadi.
+        # faqat TUGATILGAN battlelar hisobga olinadi; top 3 kanal
         rows = q("""SELECT b.chat_id, COUNT(*) bn,
-                    SUM(CASE WHEN b.finished=0 THEN 1 ELSE 0 END) active_bn,
-                    SUM(CASE WHEN b.finished=1 THEN 1 ELSE 0 END) finished_bn,
                     (SELECT COUNT(*) FROM votes v JOIN battles b2 ON b2.id=v.battle_id
-                     WHERE b2.chat_id=b.chat_id) vn
-                    FROM battles b
+                     WHERE b2.chat_id=b.chat_id AND b2.finished=1) vn
+                    FROM battles b WHERE b.finished=1
                     GROUP BY b.chat_id ORDER BY vn DESC, bn DESC LIMIT 3""")
         medals = ["🥇", "🥈", "🥉"]
         lines = []
@@ -1119,21 +1080,16 @@ async def adm_cb(c: CallbackQuery, state: FSMContext):
             else:
                 name = str(r["chat_id"])
             lines.append(f"{medals[i]} <b>Kanal:</b> {name}\n"
-                         f"   🥊 Jami battle: <b>{r['bn']}</b> ta\n"
-                         f"   🟢 Davom etmoqda: <b>{r['active_bn']}</b> ta\n"
-                         f"   🏁 Tugagan: <b>{r['finished_bn']}</b> ta\n"
-                         f"   🗳 Ovozlar: <b>{r['vn']}</b> ta")
-        tb = q("SELECT COUNT(*) n FROM battles")[0]["n"]
-        active_tb = q("SELECT COUNT(*) n FROM battles WHERE finished=0")[0]["n"]
-        finished_tb = q("SELECT COUNT(*) n FROM battles WHERE finished=1")[0]["n"]
-        tv = q("SELECT COUNT(*) n FROM votes")[0]["n"]
+                         f"   🥊 Ovoz battle: <b>{r['bn']}</b> ta\n"
+                         f"   🗳 Ovoz soni: <b>{r['vn']}</b>")
+        tb = q("SELECT COUNT(*) n FROM battles WHERE finished=1")[0]["n"]
+        tv = q("""SELECT COUNT(*) n FROM votes v JOIN battles b ON b.id=v.battle_id
+                  WHERE b.finished=1""")[0]["n"]
         await show(c, "🏆 <b>Ovoz battlelar</b>\n\n"
-                      f"🥊 Jami ovoz battle: <b>{tb}</b> ta\n"
-                      f"🟢 Hozir bo'layotgan: <b>{active_tb}</b> ta\n"
-                      f"🏁 Tugagan: <b>{finished_tb}</b> ta\n"
-                      f"🗳 Jami saqlangan ovoz: <b>{tv}</b> ta\n\n"
-                      "🔝 <b>Top 3 kanal (barcha battlelar):</b>\n\n" +
-                   ("\n\n".join(lines) or "Hali ovoz battle yo'q."), back)
+                      f"✅ Tugatilgan ovoz battle: <b>{tb}</b> ta\n"
+                      f"🗳 Jami to'plangan ovoz: <b>{tv}</b>\n\n"
+                      "🔝 <b>Top 3 kanal:</b>\n\n" +
+                   ("\n\n".join(lines) or "Hali tugatilgan battle yo'q."), back)
     elif act == "chans":
         text, kb = chans_view()
         await show(c, text, kb)
@@ -1228,35 +1184,6 @@ async def start(m: Message, command: CommandObject, bot: Bot, state: FSMContext)
     if re.fullmatch(r"b\d+", arg):
         text, kb = await try_join(bot, m.from_user, int(arg[1:]))
         return await m.answer(text, reply_markup=kb)
-
-    # Kanal postidagi 🗳 Ovoz berish tugmasi shu deep-link orqali botga olib keladi.
-    # Avval /start ishlaydi, keyin ovoz berish tekshiruvlari bajariladi.
-    vm = re.fullmatch(r"v(\d+)_(\d+)", arg)
-    if vm:
-        bid, pid = map(int, vm.groups())
-        b = battle(bid)
-        if not b or b["finished"]:
-            return await m.answer(B(b or "uz", "a_ended"), reply_markup=main_kb(uid))
-        if not q("SELECT 1 FROM participants WHERE battle_id=? AND user_id=?", bid, pid):
-            return await m.answer(B(b, "a_nopart"), reply_markup=main_kb(uid))
-        miss = await missing_for(bot, b, uid)
-        if miss:
-            kb = InlineKeyboardBuilder()
-            for item in miss:
-                if item["link"]:
-                    kb.row(ib(f"📢 {item['title']}", url=item["link"]))
-            kb.row(ib(B(b, "j_check"), f"votechk:{bid}:{pid}"))
-            return await m.answer(B(b, "j_need"), reply_markup=kb.as_markup())
-        if q("SELECT 1 FROM votes WHERE battle_id=? AND voter_id=?", bid, uid):
-            return await m.answer(B(b, "a_voted"), reply_markup=main_kb(uid))
-        ex("INSERT INTO votes VALUES(?,?,?,?)", bid, uid, m.from_user.full_name, pid)
-        await m.answer(B(b, "a_ok"), reply_markup=main_kb(uid))
-        if b["end_type"] == "votes" and b["end_votes"] and standings(bid)[0]["c"] >= b["end_votes"]:
-            await finish(bot, bid)
-        else:
-            await refresh(bot, bid)
-        return
-
     await m.answer(T(uid, "welcome"), reply_markup=main_kb(uid))
 
 
@@ -1691,12 +1618,6 @@ async def b_invite(m: Message):
 
 
 # ============================================================ MAIN
-async def backup_loop():
-    while True:
-        await asyncio.sleep(6 * 60 * 60)
-        await asyncio.to_thread(backup_database, "periodic")
-
-
 async def main():
     global UNAME
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML,
@@ -1714,9 +1635,9 @@ async def main():
     await web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", "8080"))).start()
 
     asyncio.create_task(sweeper(bot))
+    asyncio.create_task(backup_loop(bot))
     asyncio.create_task(ender(bot))
     asyncio.create_task(keepalive())
-    asyncio.create_task(backup_loop())
     await bot.delete_webhook(drop_pending_updates=False)
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
