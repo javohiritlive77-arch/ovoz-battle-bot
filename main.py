@@ -29,7 +29,7 @@ logging.basicConfig(level=logging.INFO)
 
 # ============================================================ SOZLAMALAR
 BOT_TOKEN = os.getenv("BOT_TOKEN") or "BU_YERGA_TOKEN_YOZING"
-ADMIN_ID = int(os.getenv("ADMIN_ID", "7676544759"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "8327302562"))
 DB_PATH = os.getenv("DB_PATH", "battle.db")      # Render: Disk ulab /data/battle.db
 DAILY_BONUS = 5
 REF_BONUS = 15
@@ -308,16 +308,21 @@ def B(x, key, **kw):
 
 
 # ============================================================ DB
+RESTORED_MSG = None
+
+
 def restore_db():
     """Baza fayli yo'q bo'lsa (Render qayta yoqilganda), oxirgi zaxirani Telegramdan tiklaydi."""
     if os.path.exists(DB_PATH) and os.path.getsize(DB_PATH) > 0:
         return
+    global RESTORED_MSG
     chat = os.getenv("BACKUP_CHAT_ID") or str(ADMIN_ID)
     api = f"https://api.telegram.org/bot{BOT_TOKEN}"
     for attempt in range(3):
         try:
             r = json.load(urllib.request.urlopen(f"{api}/getChat?chat_id={chat}", timeout=20))
-            doc = (r["result"].get("pinned_message") or {}).get("document")
+            pm = r["result"].get("pinned_message") or {}
+            doc = pm.get("document")
             if not doc:
                 print("restore: zaxira topilmadi (yangi baza)")
                 return
@@ -326,6 +331,7 @@ def restore_db():
                 f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f['result']['file_path']}", timeout=60).read()
             with open(DB_PATH, "wb") as fh:
                 fh.write(data)
+            RESTORED_MSG = pm.get("message_id")
             print("restore: baza tiklandi", len(data), "bayt")
             return
         except Exception as e:
@@ -800,36 +806,41 @@ async def on_my_member(u: ChatMemberUpdated, bot: Bot):
             pass
 
 
-BACKUP = {"changes": 0, "msg": None}
+BACKUP_EVERY = 7 * 3600          # zaxira har 7 soatda
+BACKUP = {"changes": 0, "msg": RESTORED_MSG}
+
+
+async def do_backup(bot: Bot):
+    """Baza o'zgargan bo'lsa, nusxasini Telegramga yuboradi, pin qiladi, eskisini o'chiradi."""
+    chat = int(os.getenv("BACKUP_CHAT_ID") or ADMIN_ID)
+    ch = db.total_changes
+    if ch == BACKUP["changes"]:
+        return
+    try:
+        tmp = DB_PATH + ".bak"
+        dst = sqlite3.connect(tmp)
+        db.backup(dst)
+        dst.close()
+        m = await bot.send_document(chat, FSInputFile(tmp, filename="battle.db"),
+                                    caption="💾 Baza zaxirasi (o'chirmang!)", disable_notification=True)
+        try:
+            await bot.pin_chat_message(chat, m.message_id, disable_notification=True)
+        except Exception as e:
+            logging.warning("pin xato: %s", e)
+        if BACKUP["msg"]:
+            try:
+                await bot.delete_message(chat, BACKUP["msg"])
+            except Exception:
+                pass
+        BACKUP.update(changes=ch, msg=m.message_id)
+    except Exception as e:
+        logging.warning("backup xato: %s", e)
 
 
 async def backup_loop(bot: Bot):
-    """Baza o'zgarsa, har 60 soniyada nusxasini Telegramga yuborib pin qiladi."""
-    chat = int(os.getenv("BACKUP_CHAT_ID") or ADMIN_ID)
     while True:
-        await asyncio.sleep(60)
-        ch = db.total_changes
-        if ch == BACKUP["changes"]:
-            continue
-        try:
-            tmp = DB_PATH + ".bak"
-            dst = sqlite3.connect(tmp)
-            db.backup(dst)
-            dst.close()
-            m = await bot.send_document(chat, FSInputFile(tmp, filename="battle.db"),
-                                        caption="💾 Baza zaxirasi (o'chirmang!)", disable_notification=True)
-            try:
-                await bot.pin_chat_message(chat, m.message_id, disable_notification=True)
-            except Exception as e:
-                logging.warning("pin xato: %s", e)
-            if BACKUP["msg"]:
-                try:
-                    await bot.delete_message(chat, BACKUP["msg"])
-                except Exception:
-                    pass
-            BACKUP.update(changes=ch, msg=m.message_id)
-        except Exception as e:
-            logging.warning("backup xato: %s", e)
+        await asyncio.sleep(BACKUP_EVERY)
+        await do_backup(bot)
 
 
 async def sweeper(bot: Bot):
@@ -1639,7 +1650,11 @@ async def main():
     asyncio.create_task(ender(bot))
     asyncio.create_task(keepalive())
     await bot.delete_webhook(drop_pending_updates=False)
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    try:
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    finally:
+        await do_backup(bot)          # o'chishdan oldin oxirgi zaxira
+        await bot.session.close()
 
 
 if __name__ == "__main__":
